@@ -4,30 +4,29 @@ import IORedis from 'ioredis';
 type Db = IORedis.Redis;
 const DEFAULTSEPARATOR = '/';
 export function setup(opts: IORedis.RedisOptions) { return new IORedis(opts); }
+function toOpaqueKey(user: string, app: string, opaque: string) { return `opaque/${user}/${app}/${opaque}`; }
+function toDiffZkey(user: string, app: string) { return `diff/${user}/${app}` }
+function toUserKey(user: string) { return `tokens/${user}`; }
 export async function submitDiff(db: Db, user: string, app: string, payload: string, opaque: string) {
-  const zsetKey = ['data', user, app, 'diffs'].join(DEFAULTSEPARATOR);
-  const opaqueKey = ['data', user, app, 'opaques', opaque].join(DEFAULTSEPARATOR);
-  const num = (await db.zcard(zsetKey)) || -1;
-  return db.multi().zadd(zsetKey, 'NX', (num + 1).toString(), opaque).set(opaqueKey, payload).exec();
+  const luaScript = `return {redis.call('zadd', KEYS[1], 'NX', redis.call('zcard', KEYS[1]), ARGV[1]),
+redis.call('set', KEYS[2], ARGV[2])}`;
+  return db.eval(luaScript, 2, toDiffZkey(user, app), toOpaqueKey(user, app, opaque), opaque, payload);
 }
-export function opaqueRank(db: Db, user: string, app: string, opaque: string) {
-  const zsetKey = ['data', user, app, 'diffs'].join(DEFAULTSEPARATOR);
+export function opaqueRankCard(db: Db, user: string, app: string, opaque: string) {
+  const zsetKey = toDiffZkey(user, app);
   return db.multi().zrank(zsetKey, opaque).zcard(zsetKey).exec();
 }
 export function lastDiffsOpaques(db: Db, user: string, app: string, n: number) {
-  return db.zrevrange(['data', user, app, 'diffs'].join(DEFAULTSEPARATOR), -Math.abs(n), -1);
+  return db.zrevrange(toDiffZkey(user, app), -Math.abs(n), -1);
 }
-export function numDiffs(db: Db, user: string, app: string) {
-  return db.zcard(['data', user, app, 'diffs'].join(DEFAULTSEPARATOR));
-}
+export function numDiffs(db: Db, user: string, app: string) { return db.zcard(toDiffZkey(user, app)); }
 export function opaqueToPayload(db: Db, user: string, app: string, opaque: string) {
-  return db.get(['data', user, app, 'opaques', opaque].join(DEFAULTSEPARATOR));
+  return db.get(toOpaqueKey(user, app, opaque));
 }
 async function reqToUser(db: Db, req: express.Request) {
   const user = req.get('X-Redis-Family-User');
   const token = req.get('X-Redis-Family-Token');
-  if (user && token && (await db.sismember(['tokens', user].join(DEFAULTSEPARATOR), token))) { return user; }
-  return '';
+  return (user && token && (await db.sismember(toUserKey(user), token))) ? user : '';
 }
 export function serve(db: Db, port: number) {
   const app = express();
@@ -45,17 +44,18 @@ export function serve(db: Db, port: number) {
       res.sendStatus(400);
     }
   });
-  app.get('/do-i-have-the-latest', (req, res) => res.send('Post `{user, app, opaque}` to here'));
-  app.post('/do-i-have-the-latest', async (req, res) => {
+  app.get('/my-latest', (req, res) => res.send('Post `{user, app, opaque}` to here'));
+  app.post('/my-latest', async (req, res) => {
     const {user, app, opaque} = req.body as {[name: string]: string | undefined};
     const authUser = await reqToUser(db, req);
     if (!(user === authUser)) {
       res.sendStatus(401);
     } else if (user && authUser && user === authUser && app && opaque) {
-      let res = await opaqueRank(db, user, app, opaque);
+      let [[_, rank], [__, card]] = await opaqueRankCard(db, user, app, opaque);
+      res.json([rank, card]);
     } else {
       res.sendStatus(400);
     }
   });
-  return app.listen(port, () => console.log(`Express listening on port ${port}!`));
+  return app.listen(port, () => console.log(`# Express listening on port ${port}!`));
 }
