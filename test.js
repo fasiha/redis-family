@@ -111,9 +111,17 @@ test('basic', async t => {
 
   {
     const body = JSON.stringify({user, app});
+    const response = await fetch(`http://localhost:${webport}/since`, {method, body});
+    const ok = await response.ok;
+    t.notOk(ok, 'since without headers is not ok');
+    t.equal(response.status, 401, 'specifically, 401 unauth');
+  }
+
+  {
+    const body = JSON.stringify({user, app});
     const response = await fetch(`http://localhost:${webport}/since`, {headers, method, body});
     const ok = await response.ok;
-    t.ok(ok, 'asking for since');
+    t.ok(ok, 'asking for since with headers');
     const contents = await response.json();
     const idRegexp = /^[0-9]+-[0-9]+$/;
     t.ok(contents.every(x => x instanceof Array && x.length === 2 && typeof x[0] === 'string' && idRegexp.test(x[0]) &&
