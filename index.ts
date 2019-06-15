@@ -2,26 +2,14 @@
 import express from 'express';
 import IORedis from 'ioredis';
 type Db = IORedis.Redis;
-const DEFAULTSEPARATOR = '/';
 export function setup(opts: IORedis.RedisOptions) { return new IORedis(opts); }
-function toOpaqueKey(user: string, app: string, opaque: string) { return `opaque/${user}/${app}/${opaque}`; }
-function toDiffZkey(user: string, app: string) { return `diff/${user}/${app}` }
+function toStreamKey(user: string, app: string) { return `stream/${user}/${app}`; }
 function toUserKey(user: string) { return `tokens/${user}`; }
-export async function submitDiff(db: Db, user: string, app: string, payload: string, opaque: string) {
-  const luaScript = `return {redis.call('zadd', KEYS[1], 'NX', redis.call('zcard', KEYS[1]), ARGV[1]),
-redis.call('set', KEYS[2], ARGV[2])}`;
-  return db.eval(luaScript, 2, toDiffZkey(user, app), toOpaqueKey(user, app, opaque), opaque, payload);
+async function submitDiff(db: Db, user: string, app: string, payload: string) {
+  return db.xadd(toStreamKey(user, app), '*', 'payload', payload);
 }
-export function opaqueRankCard(db: Db, user: string, app: string, opaque: string) {
-  const zsetKey = toDiffZkey(user, app);
-  return db.multi().zrank(zsetKey, opaque).zcard(zsetKey).exec();
-}
-export function lastDiffsOpaques(db: Db, user: string, app: string, n: number) {
-  return db.zrevrange(toDiffZkey(user, app), -Math.abs(n), -1);
-}
-export function numDiffs(db: Db, user: string, app: string) { return db.zcard(toDiffZkey(user, app)); }
-export function opaqueToPayload(db: Db, user: string, app: string, opaque: string) {
-  return db.get(toOpaqueKey(user, app, opaque));
+async function getDiffsSince(db: Db, user: string, app: string, since: string = '-', count: number = 100) {
+  return db.xrange(toStreamKey(user, app), since, '+', 'COUNT', count);
 }
 async function reqToUser(db: Db, req: express.Request) {
   const user = req.get('X-Redis-Family-User');
@@ -31,31 +19,30 @@ async function reqToUser(db: Db, req: express.Request) {
 export function serve(db: Db, port: number) {
   const app = express();
   app.use(express.json());
-  app.get('/', (req, res) => res.send('Post `{user, app, payload, opaque}` to here'));
+  app.get('/', (_, res) => res.send('Post `{user, app, payload}` to here'));
   app.post('/', async (req, res) => {
-    const {payload, user, app, opaque} = req.body as {[name: string]: string | undefined};
+    const {payload, user, app} = req.body as {[name: string]: string | undefined};
     const authUser = await reqToUser(db, req);
     if (!(user === authUser)) {
       res.sendStatus(401);
-    } else if (payload && user && authUser && user === authUser && app && opaque) {
+    } else if (payload && user && authUser && user === authUser && app) {
       res.sendStatus(200);
-      submitDiff(db, user, app, payload, opaque);
+      submitDiff(db, user, app, payload);
     } else {
       res.sendStatus(400);
     }
   });
-  app.get('/my-latest', (req, res) => res.send('Post `{user, app, opaque}` to here'));
-  app.post('/my-latest', async (req, res) => {
-    const {user, app, opaque} = req.body as {[name: string]: string | undefined};
+  app.get('/since', (_, res) => res.send('Post `{user, app, since}` to here'));
+  app.post('/since', async (req, res) => {
+    const {user, app, since} = req.body as {[name: string]: string | undefined};
     const authUser = await reqToUser(db, req);
     if (!(user === authUser)) {
       res.sendStatus(401);
-    } else if (user && authUser && user === authUser && app && opaque) {
-      let [[_, rank], [__, card]] = await opaqueRankCard(db, user, app, opaque);
-      res.json([rank, card]);
+    } else if (user && authUser && user === authUser && app) {
+      res.json(await getDiffsSince(db, user, app, since || '-'));
     } else {
       res.sendStatus(400);
     }
   });
-  return app.listen(port, () => console.log(`# Express listening on port ${port}!`));
+  return app.listen(port);
 }

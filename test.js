@@ -76,13 +76,12 @@ test('basic', async t => {
   }
 
   const user = testUser;
-  const opaque = Math.random().toString(36);
   const app = 'life';
   const payload = 'hi';
   const method = 'POST';
 
   {
-    const body = JSON.stringify({user, app, payload, opaque});
+    const body = JSON.stringify({user, app, payload});
     const response = await fetch(`http://localhost:${webport}`, {method, body});
     const ok = await response.ok;
     t.notOk(ok, 'post / without any tokens set up fails');
@@ -92,7 +91,7 @@ test('basic', async t => {
   await redisClient.sadd(`tokens/${testUser}`, testToken);
 
   {
-    const body = JSON.stringify({user, app, payload, opaque});
+    const body = JSON.stringify({user, app, payload});
     const response = await fetch(`http://localhost:${webport}`, {method, body});
     t.equal(response.status, 401, 'still 401 after creating user token in Redis if headers not included');
   }
@@ -104,20 +103,28 @@ test('basic', async t => {
   };
 
   {
-    const body = JSON.stringify({user, app, payload, opaque});
+    const body = JSON.stringify({user, app, payload});
     const response = await fetch(`http://localhost:${webport}`, {headers, method, body});
     const ok = await response.ok;
     t.ok(ok, 'now it works with headers');
   }
 
   {
-    const body = JSON.stringify({user, app, opaque});
-    const response = await fetch(`http://localhost:${webport}/my-latest`, {headers, method, body});
+    const body = JSON.stringify({user, app});
+    const response = await fetch(`http://localhost:${webport}/since`, {headers, method, body});
     const ok = await response.ok;
-    t.ok(ok, 'asking for latest');
-    const [rank, cardinality] = await response.json();
-    t.equal(rank, 0, 'rank = 0 for first item');
-    t.equal(cardinality, 1, 'cardinality = 1 for first item');
+    t.ok(ok, 'asking for since');
+    const contents = await response.json();
+    const idRegexp = /^[0-9]+-[0-9]+$/;
+    t.ok(contents.every(x => x instanceof Array && x.length === 2 && typeof x[0] === 'string' && idRegexp.test(x[0]) &&
+                             x[1] instanceof Array && x[1][0] === 'payload'),
+         'verify shape of since\'s reply');
+    t.equal(contents.length, 1, 'only one item was inserted');
+    for (const [id, kvs] of contents) {
+      const map = new Map([kvs]);
+      t.equal(map.size, 1, 'entry had only one field');
+      t.equal(map.get('payload'), payload, 'field contents matches');
+    }
   }
 
   // Teardown
